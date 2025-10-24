@@ -1,8 +1,9 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
-from scipy.io import wavfile
+from pydub import AudioSegment
 import numpy as np
+import io
 
 app = FastAPI()
 
@@ -13,39 +14,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ Step 2: Use Whisper-medium for better accuracy
-processor = WhisperProcessor.from_pretrained("openai/whisper-medium")
-model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-medium")
+# Load Whisper-small
+processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
     try:
-        sr, waveform = wavfile.read(file.file)
-        waveform = waveform.astype(np.float32)
+        # Read uploaded file into memory
+        audio_bytes = await file.read()
 
-        # ✅ Normalize safely
-        max_val = np.abs(waveform).max()
-        if max_val > 0:
-            waveform = waveform / max_val
+        # Decode using FFmpeg via pydub
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes))  # auto-detects format
+        audio = audio.set_channels(1).set_frame_rate(16000)
 
-        # ✅ Step 3: Pad short audio to ~1 second (16000 samples)
-        if waveform.shape[0] < 16000:
-            padded = np.zeros(16000, dtype=np.float32)
-            start = (16000 - waveform.shape[0]) // 2
-            padded[start:start + waveform.shape[0]] = waveform
-            waveform = padded
+        # Convert to float32 numpy array
+        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+        samples = samples / np.abs(samples).max()  # normalize
 
+        # Transcribe with Whisper
         inputs = processor(
-            waveform.squeeze(),
-            sampling_rate=sr,
+            samples,
+            sampling_rate=16000,
             return_tensors="pt",
             return_attention_mask=True,
-            language="en",  # Force English transcription
+            language="en",
             task="transcribe"
         )
         predicted_ids = model.generate(inputs.input_features, attention_mask=inputs.attention_mask)
         transcript = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+
         return {"transcript": transcript}
+
     except Exception as e:
         print("❌ Transcription error:", e)
         return {"error": str(e)}
