@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
+from transformers import WhisperProcessor, WhisperForConditionalGeneration, pipeline
 from pydub import AudioSegment
 import numpy as np
 import io
@@ -19,15 +19,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Whisper setup
 processor = WhisperProcessor.from_pretrained("openai/whisper-small")
 model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
+model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(language="en", task="transcribe")
+
+# Sentiment pipeline (Hugging Face)
+sentiment_pipeline = pipeline("sentiment-analysis")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 def detect_fillers_with_llm(transcript: str) -> dict:
     prompt = f"""
     Analyze the following transcript and identify all filler words used by the speaker.
-    Return a JSON object with each filler word and its count, and a total count.
+    Return a JSON object with each filler word and its count, and a total count. 
     Do not assume any predefined list — infer filler words based on context and usage.
 
     Transcript:
@@ -48,6 +53,22 @@ def detect_fillers_with_llm(transcript: str) -> dict:
     except Exception as e:
         print("LLM filler detection error:", e)
         return {"filler_words": {}, "total_filler_count": 0}
+
+def analyze_sentiment(text: str) -> str:
+    if not text or text.strip() == "":
+        return "neutral"
+    try:
+        res = sentiment_pipeline(text[:1000])  # cap length to avoid huge inputs
+        label = res[0]["label"].lower()
+        # Normalize label names to simple set
+        if label.startswith("pos"):
+            return "positive"
+        if label.startswith("neg"):
+            return "negative"
+        return label
+    except Exception as e:
+        print("Sentiment analysis error:", e)
+        return "unknown"
 
 def compute_silence_duration(wav_path, frame_duration=0.025, silence_threshold=0.01):
     with wave.open(wav_path, "rb") as wf:
@@ -107,9 +128,6 @@ async def transcribe(file: UploadFile = File(...)):
             language="en",
             task="transcribe"
         )
-        model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(
-            language="en", task="transcribe"
-        )
 
         predicted_ids = model.generate(inputs.input_features, attention_mask=inputs.attention_mask)
         transcript = processor.batch_decode(predicted_ids, skip_special_tokens=False)[0]
@@ -122,14 +140,18 @@ async def transcribe(file: UploadFile = File(...)):
         filler_result = detect_fillers_with_llm(transcript)
         filler_count = filler_result.get("total_filler_count", 0)
 
+        sentiment = analyze_sentiment(transcript)
+
         print("Transcript:", transcript)
         print("Filler count:", filler_count)
         print("Silence duration:", silence_duration)
+        print("Sentiment:", sentiment)
 
         return {
             "transcript": transcript,
             "filler_count": filler_count,
             "silence_duration": silence_duration,
+            "sentiment": sentiment,
         }
 
     except Exception as e:
@@ -138,5 +160,6 @@ async def transcribe(file: UploadFile = File(...)):
             "transcript": "",
             "filler_count": 0,
             "silence_duration": 0,
+            "sentiment": "unknown",
             "error": str(e)
         }

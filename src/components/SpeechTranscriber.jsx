@@ -4,6 +4,7 @@ const SpeechTranscriber = () => {
   const [transcript, setTranscript] = useState("");
   const [fillerCount, setFillerCount] = useState(0);
   const [silenceDuration, setSilenceDuration] = useState(0);
+  const [sentiment, setSentiment] = useState("unknown");
   const [error, setError] = useState("");
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -32,6 +33,7 @@ const SpeechTranscriber = () => {
         setTranscript(data.transcript || "No transcript received.");
         setFillerCount(data.filler_count || 0);
         setSilenceDuration(data.silence_duration || 0);
+        setSentiment(data.sentiment || "unknown");
         setError(data.error || "");
       } catch (err) {
         console.error("Error contacting backend:", err);
@@ -62,6 +64,7 @@ const SpeechTranscriber = () => {
         <p><strong>Transcript:</strong> {transcript}</p>
         <p><strong>Filler words detected:</strong> {fillerCount}</p>
         <p><strong>Silence duration:</strong> {silenceDuration} seconds</p>
+        <p><strong>Sentiment:</strong> {sentiment}</p>
         {error && <p style={{ color: "red" }}><strong>Error:</strong> {error}</p>}
       </div>
     </div>
