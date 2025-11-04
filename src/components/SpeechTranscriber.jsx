@@ -2,12 +2,15 @@ import React, { useState, useRef } from "react";
 
 const SpeechTranscriber = () => {
   const [transcript, setTranscript] = useState("");
+  const [fillerCount, setFillerCount] = useState(0);
+  const [silenceDuration, setSilenceDuration] = useState(0);
+  const [error, setError] = useState("");
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
 
   const startRecording = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mediaRecorder = new MediaRecorder(stream); // Chrome uses WebM
+    const mediaRecorder = new MediaRecorder(stream);
     audioChunksRef.current = [];
 
     mediaRecorder.ondataavailable = (e) => {
@@ -26,10 +29,14 @@ const SpeechTranscriber = () => {
         });
 
         const data = await res.json();
-        setTranscript(data.transcript || data.error || "No transcript received.");
+        setTranscript(data.transcript || "No transcript received.");
+        setFillerCount(data.filler_count || 0);
+        setSilenceDuration(data.silence_duration || 0);
+        setError(data.error || "");
       } catch (err) {
-        console.error("Error sending to backend:", err);
+        console.error("Error contacting backend:", err);
         setTranscript("Error contacting backend.");
+        setError(err.message);
       }
     };
 
@@ -50,16 +57,12 @@ const SpeechTranscriber = () => {
         Start
       </button>
       <button onClick={stopRecording}>Stop</button>
-      <div
-        style={{
-          marginTop: "2rem",
-          padding: "1rem",
-          background: "#fff",
-          border: "1px solid #ccc",
-          minHeight: "100px",
-        }}
-      >
-        {transcript}
+
+      <div style={{ marginTop: "2rem" }}>
+        <p><strong>Transcript:</strong> {transcript}</p>
+        <p><strong>Filler words detected:</strong> {fillerCount}</p>
+        <p><strong>Silence duration:</strong> {silenceDuration} seconds</p>
+        {error && <p style={{ color: "red" }}><strong>Error:</strong> {error}</p>}
       </div>
     </div>
   );
