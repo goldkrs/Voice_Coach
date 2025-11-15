@@ -1,0 +1,7 @@
+fastapi==0.119.1
+transformers==4.57.1
+pydantic==2.12.3
+pydantic_core==2.41.4
+passlib==1.7.4
+pydub==0.25.1
+numpy==2.3.4
