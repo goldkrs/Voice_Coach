@@ -5,3 +5,4 @@ pydantic_core==2.41.4
 passlib==1.7.4
 pydub==0.25.1
 numpy==2.3.4
+sentencepiece=0.2.1

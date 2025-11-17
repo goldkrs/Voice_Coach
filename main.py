@@ -26,7 +26,12 @@ from passlib.context import CryptContext
 from transformers import WhisperProcessor, WhisperForConditionalGeneration, pipeline
 from pydub import AudioSegment
 import numpy as np
-
+import re
+try:
+    from filler_detector import detect_fillers_with_bert
+except Exception:
+    # if filler_detector isn't available, we'll fall back to a simple keyword detector
+    detect_fillers_with_bert = None
 # ---------- Config ----------
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -155,29 +160,40 @@ class TranscriptionOut(BaseModel):
 
 # ---------- Your existing helper functions (cleaned up) ----------
 def detect_fillers_with_llm(transcript: str) -> dict:
-    prompt = f"""Analyze the following transcript and identify all filler words used by the speaker. Return a JSON object with each filler word and its count, and a total count. Do not assume any predefined list — infer filler words based on context and usage.
-
-Transcript:
-\"\"\"{transcript}\"\"\""""
+    """
+    Backwards-compatible wrapper for existing call sites.
+    Prefer the local BERT-based detector if available, otherwise fall back
+    to a lightweight keyword-based detector.
+    """
     try:
-        if not OPENAI_API_KEY:
-            return {"filler_words": {}, "total_filler_count": 0}
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-            json={
-                "model": "gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        return json.loads(content)
+        if detect_fillers_with_bert:
+            return detect_fillers_with_bert(transcript)
     except Exception as e:
-        print("LLM filler detection error:", e)
-        return {"filler_words": {}, "total_filler_count": 0}
+        print("Local filler detector error:", e)
+
+    # fallback: simple keyword matcher (keeps behaviour safe if model missing)
+    common = {"um", "uh", "like", "you know", "so", "actually", "basically", "right", "okay", "i", "mean"}
+    words = re.findall(r"\b[\w']+\b", (transcript or "").lower())
+    counts = {}
+    i = 0
+    # combine two-token phrases like "i mean" and "you know"
+    while i < len(words):
+        w = words[i]
+        two = f"{w} {words[i+1]}" if i + 1 < len(words) else None
+        if two and two in common:
+            counts[two] = counts.get(two, 0) + 1
+            i += 2
+            continue
+        if w in common:
+            # avoid counting "i" in isolation unless followed by "mean"
+            if w == "i" and i + 1 < len(words) and words[i+1] == "mean":
+                # will be counted as "i mean" in two-token branch above
+                i += 1
+            else:
+                counts[w] = counts.get(w, 0) + 1
+        i += 1
+
+    return {"filler_words": counts, "total_filler_count": sum(counts.values())}
 
 def split_sentences(text: str):
     if not text or text.strip() == "":
@@ -251,6 +267,34 @@ def compute_silence_duration(wav_path, frame_duration=0.025, silence_threshold=0
         if energy < silence_threshold:
             silence_frames += 1
     return round(silence_frames * frame_duration, 2)
+
+def segment_transcribe(audio_segment:AudioSegment, window_ms=5000, overlap_ms=1000):
+    duration_ms = len(audio_segment)
+    step = window_ms - overlap_ms if window_ms > overlap_ms else window_ms
+    transcript_array = []
+    for start_ms in range(0, max(1, duration_ms - window_ms + 1), step):
+        end_ms = start_ms + window_ms
+        seg = audio_segment[start_ms:end_ms]
+        if len(seg) < 200:
+            continue
+        samples = np.array(seg.get_array_of_samples()).astype(np.float32)
+        if seg.channels > 1:
+            samples = samples.reshape((-1, seg.channels)).mean(axis=1)
+        max_val = np.abs(samples).max() if samples.size else 0
+        if max_val > 0:
+            samples = samples / max_val
+        inputs = processor(
+            samples,
+            sampling_rate=seg.frame_rate,
+            return_tensors="pt",
+            return_attention_mask=True,
+            language="en",
+            task="transcribe",
+        )
+        predicted_ids = model.generate(inputs.input_features, attention_mask=inputs.attention_mask)
+        seg_transcript = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0].strip()
+        transcript_array.append(seg_transcript)
+    return transcript_array
 
 def segment_audio_and_transcribe(audio_segment: AudioSegment, window_ms=5000, overlap_ms=1000):
     duration_ms = len(audio_segment)
@@ -398,23 +442,8 @@ async def transcribe(file: UploadFile = File(...), request: Request = None, db: 
         audio = audio.set_channels(1).set_frame_rate(16000)
 
         # global transcription (your existing)
-        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
-        if audio.channels > 1:
-            samples = samples.reshape((-1, audio.channels)).mean(axis=1)
-        max_val = np.abs(samples).max() if samples.size else 0
-        if max_val > 0:
-            samples = samples / max_val
-
-        inputs = processor(
-            samples,
-            sampling_rate=16000,
-            return_tensors="pt",
-            return_attention_mask=True,
-            language="en",
-            task="transcribe"
-        )
-        predicted_ids = model.generate(inputs.input_features, attention_mask=inputs.attention_mask)
-        transcript = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+        transcript_array = segment_transcribe(audio)
+        transcript = ' '.join(transcript_array)
 
         # compute silence duration using temp wav file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
@@ -463,6 +492,7 @@ async def transcribe(file: UploadFile = File(...), request: Request = None, db: 
 
     except Exception as e:
         print("❌ Transcription error:", e)
+        raise e
         return {
             "transcript": "",
             "filler_count": 0,
